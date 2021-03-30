@@ -1,0 +1,10 @@
+[package]
+name = "converter"
+version = "0.1.0"
+authors = ["Michał Sala <ms406329@students.mimuw.edu.pl>"]
+edition = "2018"
+
+[dependencies]
+goblin = "0.3"
+scroll = "0.10.2"
+
