@@ -4,7 +4,7 @@ use std::{cell::RefCell, collections::HashMap, ffi::CString, fs, io::Write};
 use std::{collections::BTreeMap, rc::Rc};
 
 fn main() -> error::Result<()> {
-    let buffer = fs::read("asdf.o")?;
+    let buffer = fs::read("reloc.o")?;
     match Object::parse(&buffer)? {
         Object::Elf(elf) => {
             process(elf, &buffer);
@@ -16,7 +16,10 @@ fn main() -> error::Result<()> {
 
 #[derive(Debug, Clone)]
 struct Section {
+    // sh_name, sh_link and sh_info are invalid
     header: elf::SectionHeader,
+
+    // for SHT_NOBITS section type, content.len() is 0 and header.sh_size >= 0
     content: Vec<u8>,
 
     // An object file can have more than one section with the same name.
@@ -89,7 +92,6 @@ struct Reloc {
     symbol: Rc<Symbol>,
 }
 
-// TODO into Section
 #[derive(Debug, Clone)]
 struct RelocSection {
     target: Rc<Section>,
@@ -97,26 +99,78 @@ struct RelocSection {
 }
 
 impl RelocSection {
-    fn new(
-        target: Rc<Section>,
-        reloc_section: &elf::RelocSection,
-        symbols: &Vec<Rc<Symbol>>,
-    ) -> Self {
+    fn new(target: Rc<Section>, reloc_section: &elf::RelocSection, symtab: &Symtab) -> Self {
         let mut relocs = Vec::with_capacity(reloc_section.len());
 
         for reloc in reloc_section.iter() {
-            let symbol = symbols.get(reloc.r_sym).expect("").clone();
+            let symbol = symtab.symbols.get(reloc.r_sym).expect("").clone();
             let r = Reloc { reloc, symbol };
             relocs.push(r);
         }
 
         RelocSection { target, relocs }
     }
+
+    fn to_section(&self, symtab: &Section) -> Section {
+        use goblin::container::{Container, Ctx, Endian};
+        use scroll::Pwrite;
+
+        let name = format!(".rela{}", self.target.name);
+
+        let relocs = self.relocs.iter().map(|r| {
+            let mut updated_reloc = r.reloc.clone();
+            updated_reloc.r_sym = r
+                .symbol
+                .index
+                .borrow()
+                .expect("symbol should have index assigned");
+
+            updated_reloc
+        });
+
+        let mut content = Vec::new();
+
+        let is_rela = true;
+        let ctx64 = Ctx::new(Container::Big, Endian::Little);
+        let mut reloc_bytes = [0u8; elf::reloc::reloc64::SIZEOF_RELA];
+        for reloc in relocs {
+            reloc_bytes.pwrite_with(reloc, 0, (is_rela, ctx64)).unwrap();
+            content.extend_from_slice(&reloc_bytes);
+        }
+
+        let mut header = elf::SectionHeader::new();
+        header.sh_type = SHT_RELA;
+        header.sh_size = content.len() as u64;
+        header.sh_entsize = elf::reloc::reloc64::SIZEOF_RELA as u64;
+
+        // The section header index of the section to which the relocation applies
+        header.sh_info = self
+            .target
+            .index
+            .borrow()
+            .expect("reloc target should have index assigned") as u32;
+        // The section header index of the associated symbol table
+        header.sh_link = symtab
+            .index
+            .borrow()
+            .expect("symtab associated with reloc section should have index assigned")
+            as u32;
+        // TODO sh_addralign: 2 << 8??
+        header.sh_addralign = 8;
+        header.sh_flags = SHF_INFO_LINK as u64;
+
+        Section {
+            header,
+            name,
+            content,
+            index: RefCell::new(None),
+        }
+    }
 }
 
 struct Strtab {
     strings: Vec<String>,
-    position: HashMap<String, usize>,
+    offsets: HashMap<String, usize>,
 }
 
 impl Strtab {
@@ -125,18 +179,18 @@ impl Strtab {
         strings.extend(iter);
 
         let mut index_generator = 0;
-        let mut position = HashMap::new();
+        let mut offsets = HashMap::new();
 
         for string in strings.iter() {
-            position.insert(string.clone(), index_generator);
+            offsets.insert(string.clone(), index_generator);
             index_generator += string.len() + 1;
         }
 
-        Strtab { strings, position }
+        Strtab { strings, offsets }
     }
 
     fn offset_for_string(&self, string: &str) -> Option<usize> {
-        self.position.get(string).cloned()
+        self.offsets.get(string).cloned()
     }
 
     fn to_section(&self, name: String) -> Section {
@@ -156,7 +210,6 @@ impl Strtab {
         header.sh_size = content.len() as u64;
         header.sh_addralign = 1;
         header.sh_flags = 0;
-        header.sh_name = 0;
 
         Section {
             header,
@@ -168,28 +221,25 @@ impl Strtab {
 }
 
 #[derive(Debug, Clone)]
-struct Elf {
-    sections: Vec<Rc<Section>>,
+struct Symtab {
     symbols: Vec<Rc<Symbol>>,
-    reloc_sections: Vec<RelocSection>,
 }
 
-impl Elf {
-    fn new(elf: &elf::Elf, bytes: &Vec<u8>) -> Elf {
-        let mut sections = BTreeMap::new();
+// TODO sort, local first
+
+impl Symtab {
+    fn new(
+        syms: &elf::Symtab,
+        strtab: &strtab::Strtab,
+        sections: &BTreeMap<usize, Rc<Section>>,
+    ) -> Self {
         let mut symbols = Vec::new();
-        let mut reloc_sections = Vec::new();
 
-        for (ix, header) in elf.section_headers.iter().enumerate() {
-            let section = Section::extract(header, &elf.shdr_strtab, bytes);
-            sections.insert(ix, Rc::new(section));
-        }
-
-        for sym in elf.syms.iter() {
+        for sym in syms.iter() {
             let name = match sym.st_name {
                 0 => None,
                 _ => Some(
-                    elf.strtab
+                    strtab
                         .get(sym.st_name)
                         .expect("invalid shstrtab index")
                         .expect("invalid section name")
@@ -208,32 +258,7 @@ impl Elf {
             symbols.push(Rc::new(symbol));
         }
 
-        for (section_ix, relocs) in elf.shdr_relocs.iter() {
-            let section = sections
-                .get(section_ix)
-                .map(|rc| rc.clone())
-                .expect("invalid section index");
-
-            let reloc_section = RelocSection::new(section, relocs.clone(), &symbols);
-            reloc_sections.push(reloc_section);
-        }
-
-        Elf {
-            sections: sections.values().cloned().collect(),
-            symbols,
-            reloc_sections,
-        }
-    }
-
-    // TODO
-    fn filtered_sections(&self) -> Vec<Rc<Section>> {
-        self.sections
-            .iter()
-            .filter(|section| section.header.is_alloc() || section.header.sh_type == SHT_NULL)
-            .filter(|section| !section.header.is_relocation())
-            .filter(|section| section.header.sh_type != SHT_NOTE)
-            .cloned()
-            .collect()
+        Symtab { symbols }
     }
 
     fn generate_strtab(&self) -> Strtab {
@@ -246,18 +271,18 @@ impl Elf {
         Strtab::new(symbol_names)
     }
 
-    fn generate_shstrtab<'a>(&self, sections: impl Iterator<Item = &'a Section>) -> Strtab {
-        use std::iter::once;
+    fn update_indexes(&self) {
+        let mut index_generator = 0;
 
-        let section_names = sections
-            .map(|section| &section.name)
-            .cloned()
-            .chain(once(".shstrtab".to_string()));
+        for symbol in self.symbols.iter() {
+            let mut index = symbol.index.borrow_mut();
+            *index = Some(index_generator);
 
-        Strtab::new(section_names)
+            index_generator += 1;
+        }
     }
 
-    fn symtab_to_section(&self, strtab: Rc<Section>) -> Section {
+    fn to_section(&self, strtab: Rc<Section>) -> Section {
         use goblin::container::{Container, Ctx, Endian};
         use scroll::Pwrite;
 
@@ -279,7 +304,7 @@ impl Elf {
         let mut header = elf::SectionHeader::new();
         header.sh_type = SHT_SYMTAB;
         header.sh_size = content.len() as u64;
-        header.sh_addralign = 4; // TODO validate
+        header.sh_addralign = 8;
         header.sh_entsize = elf::sym::sym64::SIZEOF_SYM as u64;
         header.sh_link = strtab
             .index
@@ -303,16 +328,71 @@ impl Elf {
             index: RefCell::new(None),
         }
     }
+}
 
-    fn generate_symtab_indexes(&self) {
-        let mut index_generator = 0;
+#[derive(Debug, Clone)]
+struct Elf {
+    sections: Vec<Rc<Section>>,
+    symtab: Symtab,
+    reloc_sections: Vec<RelocSection>,
+}
 
-        for symbol in self.symbols.iter() {
-            let mut index = symbol.index.borrow_mut();
-            *index = Some(index_generator);
+impl Elf {
+    fn new(elf: &elf::Elf, bytes: &Vec<u8>) -> Elf {
+        let mut sections = BTreeMap::new();
+        let mut reloc_sections = Vec::new();
 
-            index_generator += 1;
+        for (ix, header) in elf.section_headers.iter().enumerate() {
+            let section = Section::extract(header, &elf.shdr_strtab, bytes);
+            sections.insert(ix, Rc::new(section));
         }
+
+        let symtab = Symtab::new(&elf.syms, &elf.strtab, &sections);
+
+        for (section_ix, relocs) in elf.shdr_relocs.iter() {
+            let header = elf
+                .section_headers
+                .get(*section_ix)
+                .expect("invalid section index");
+
+            let index_of_relocated_section = header.sh_info;
+
+            let section = sections
+                .get(&(index_of_relocated_section as usize))
+                .map(|rc| rc.clone())
+                .expect("relocated section has invalid index");
+
+            let reloc_section = RelocSection::new(section, relocs.clone(), &symtab);
+            reloc_sections.push(reloc_section);
+        }
+
+        Elf {
+            sections: sections.values().cloned().collect(),
+            reloc_sections,
+            symtab,
+        }
+    }
+
+    // TODO
+    fn filtered_sections(&self) -> Vec<Rc<Section>> {
+        self.sections
+            .iter()
+            .filter(|section| section.header.is_alloc() || section.header.sh_type == SHT_NULL)
+            .filter(|section| !section.header.is_relocation())
+            .filter(|section| section.header.sh_type != SHT_NOTE)
+            .cloned()
+            .collect()
+    }
+
+    fn generate_shstrtab<'a>(&self, sections: impl Iterator<Item = &'a Section>) -> Strtab {
+        use std::iter::once;
+
+        let section_names = sections
+            .map(|section| &section.name)
+            .cloned()
+            .chain(once(".shstrtab".to_string()));
+
+        Strtab::new(section_names)
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -325,7 +405,7 @@ impl Elf {
         let mut header = Self::create_header64();
         buf.resize(header.e_ehsize as usize, 0);
 
-        let strtab = self.generate_strtab();
+        let strtab = self.symtab.generate_strtab();
         let strtab_section = Rc::new(strtab.to_section(".strtab".into()));
 
         // gather all sections (convert RelocSection, Symbols, ... to Section)
@@ -340,21 +420,32 @@ impl Elf {
             section_index_generator += 1;
         }
 
-        self.generate_symtab_indexes();
-        let symtab_section = self.symtab_to_section(strtab_section);
+        // generate symtab
+        self.symtab.update_indexes();
+        let symtab_section = Rc::new(self.symtab.to_section(strtab_section));
         *symtab_section.index.borrow_mut() = Some(section_index_generator);
         section_index_generator += 1;
-        sections.push(Rc::new(symtab_section));
+        sections.push(symtab_section.clone());
 
+        // generate reloc sections
+        for reloc_section in &self.reloc_sections {
+            let section = reloc_section.to_section(&symtab_section);
+            *section.index.borrow_mut() = Some(section_index_generator);
+            section_index_generator += 1;
+
+            sections.push(Rc::new(section));
+        }
+
+        // generate shstrtab section
         let shstrtab = self.generate_shstrtab(sections.iter().map(|s| s.as_ref()));
         let shstrtab_section = shstrtab.to_section(".shstrtab".into());
         *shstrtab_section.index.borrow_mut() = Some(section_index_generator);
         //section_index_generator += 1;
         sections.push(Rc::new(shstrtab_section));
 
-        // TODO reloc section
         Self::serialize_sections(&sections, &shstrtab, &mut buf, &mut header);
 
+        // Update header bytes
         buf.pwrite_with(header, 0, Endian::Little).unwrap();
 
         buf
@@ -380,6 +471,11 @@ impl Elf {
                 .offset_for_string(&section.name)
                 .expect("section should have valid name"); // TODO sure?
             headers.push(header);
+        }
+
+        // alignment
+        while buf.len() % 8 != 0 {
+            buf.push(0);
         }
 
         let section_headers_offset = buf.len();
@@ -420,7 +516,12 @@ impl Elf {
 
 fn process(elf: elf::Elf, buffer: &Vec<u8>) {
     let e = Elf::new(&elf, buffer);
-    dbg!(&e.sections);
+    let section_names = &e
+        .sections
+        .iter()
+        .map(|s| s.name.clone())
+        .collect::<Vec<_>>();
+    dbg!(section_names);
 
     let res = e.serialize();
     let mut f = fs::File::create("con.o").unwrap();
