@@ -1,7 +1,7 @@
 use goblin::{
     elf::{
         self,
-        reloc::{R_386_32, R_386_PC32, R_386_PLT32, R_X86_64_32, R_X86_64_64, R_X86_64_PC32},
+        reloc::{R_386_32, R_386_PC32, R_386_PLT32, R_X86_64_32, R_X86_64_PC32},
         section_header::*,
     },
     error, strtab, Object,
@@ -40,7 +40,7 @@ fn main() -> error::Result<()> {
 }
 
 fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
-    let e = Elf::new(&elf, buffer);
+    let mut e = Elf::new(&elf, buffer);
 
     let section_names = &e
         .sections
@@ -49,8 +49,8 @@ fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
         .collect::<Vec<_>>();
     dbg!(section_names);
 
-    for section in &e.reloc_sections {
-        //section.to_rela();
+    for section in &mut e.reloc_sections {
+        section.to_rela();
     }
 
     e.serialize()
@@ -135,28 +135,34 @@ struct Reloc {
 }
 
 impl Reloc {
-    fn extract_addend(&self, section: &Section) -> elf::Reloc {
-        let mut new = self.reloc.clone();
-
+    fn update_to_rela(&mut self, section: &mut Section) {
         match self.reloc.r_type {
             R_386_32 => {
-                new.r_type = R_X86_64_32;
+                self.reloc.r_type = R_X86_64_32;
             }
             R_386_PC32 | R_386_PLT32 => {
-                new.r_type = R_X86_64_PC32;
+                self.reloc.r_type = R_X86_64_PC32;
             }
             _ => {
                 eprintln!("unknown reloc type: {:?}", self.reloc.r_type);
+                return;
             }
         };
+
         let offset = self.reloc.r_offset as usize;
         let size = 4;
         let range = offset..(offset + size);
 
-        let addend_slice = section.content.get(range).expect("incorrect reloc range");
+        let addend_slice = section
+            .content
+            .get_mut(range)
+            .expect("incorrect reloc range");
+        let addend = u32::from_le_bytes(addend_slice.as_ref().try_into().unwrap()) as i64;
 
-        new.r_addend = Some(u32::from_le_bytes(addend_slice.try_into().unwrap()) as i64);
-        new
+        self.reloc.r_addend = Some(addend);
+        for byte in addend_slice.iter_mut() {
+            *byte = 0;
+        }
     }
 }
 
@@ -183,13 +189,11 @@ impl RelocSection {
         RelocSection { target, relocs }
     }
 
-    /*
     fn to_rela(&mut self) {
-        for r in &self.relocs {
-            let reloc_with_addend = r.extract_addend(&self.target);
+        for r in &mut self.relocs {
+            r.update_to_rela(&mut self.target.borrow_mut());
         }
     }
-    */
 
     fn to_section(&self, symtab: &Section) -> Section {
         use goblin::container::{Container, Ctx, Endian};
