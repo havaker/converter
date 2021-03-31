@@ -4,7 +4,7 @@ use goblin::{
         reloc::{R_386_32, R_386_PC32, R_386_PLT32, R_X86_64_32, R_X86_64_PC32},
         section_header::*,
     },
-    elf64::sym::STT_FILE,
+    elf64::sym::{STB_LOCAL, STT_FILE},
     error, strtab, Object,
 };
 
@@ -321,8 +321,6 @@ struct Symtab {
     orginal_index_to_new: HashMap<usize, usize>,
 }
 
-// TODO sort, local first
-
 impl Symtab {
     fn new(
         syms: &elf::Symtab,
@@ -386,21 +384,35 @@ impl Symtab {
         Strtab::new(symbol_names)
     }
 
-    fn update_indexes(&self) {
+    fn update_indexes(symbols: &Vec<Rc<RefCell<Symbol>>>) {
         let mut index_generator = 0;
 
-        for symbol in self.symbols.iter() {
+        for symbol in symbols.iter() {
             symbol.borrow_mut().index = Some(index_generator);
             index_generator += 1;
         }
+    }
+
+    fn get_sorted_symbols(&self) -> Vec<Rc<RefCell<Symbol>>> {
+        let (mut local, mut other): (Vec<_>, Vec<_>) = self
+            .symbols
+            .iter()
+            .cloned()
+            .partition(|s| s.borrow().sym.st_bind() == STB_LOCAL);
+        local.append(&mut other);
+
+        local
     }
 
     fn to_section(&self, strtab_index: usize, strtab: &Strtab) -> Section {
         use goblin::container::{Container, Ctx, Endian};
         use scroll::Pwrite;
 
-        let syms = self
-            .symbols
+        let sorted_symbols = self.get_sorted_symbols();
+
+        Self::update_indexes(&sorted_symbols);
+
+        let syms = sorted_symbols
             .iter()
             .map(|symbol| symbol.borrow().get_sym_with_updated_indexes(strtab))
             .collect::<Vec<_>>();
@@ -529,7 +541,6 @@ impl Elf {
         }
 
         // generate symtab
-        self.symtab.update_indexes();
         let strtab_section_index = strtab_section
             .borrow()
             .index
