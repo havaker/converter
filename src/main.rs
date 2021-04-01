@@ -4,7 +4,7 @@ use goblin::{
         reloc::{R_386_32, R_386_PC32, R_386_PLT32, R_X86_64_32, R_X86_64_PC32},
         section_header::*,
     },
-    elf64::sym::{STB_LOCAL, STT_FILE},
+    elf64::sym::{STB_LOCAL, STT_FILE, STT_FUNC},
     error, strtab, Object,
 };
 
@@ -49,12 +49,22 @@ fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
         .map(|s| s.borrow().name.clone())
         .collect::<Vec<_>>();
 
-    dbg!(&e.sections);
+    // dbg!(&e.sections);
     dbg!(&section_names);
 
     for section in &mut e.reloc_sections {
         section.to_rela();
     }
+
+    let func_symbols = e
+        .symtab
+        .symbols
+        .iter()
+        .filter(|s| s.borrow().sym.st_type() == STT_FUNC)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    dbg!(&func_symbols);
 
     e.serialize()
 }
@@ -165,7 +175,7 @@ impl Reloc {
             .content
             .get_mut(range)
             .expect("incorrect reloc range");
-        let addend = u32::from_le_bytes(addend_slice.as_ref().try_into().unwrap()) as i64;
+        let addend = i32::from_le_bytes(addend_slice.as_ref().try_into().unwrap()) as i64;
 
         self.reloc.r_addend = Some(addend);
         for byte in addend_slice.iter_mut() {
@@ -210,7 +220,7 @@ impl RelocSection {
         use scroll::Pwrite;
 
         let name = format!(".rela{}", self.target.borrow().name);
-        dbg!(&name);
+        // dbg!(&name);
 
         let relocs = self.relocs.iter().map(|r| {
             let mut updated_reloc = r.reloc.clone();
@@ -527,7 +537,7 @@ impl Elf {
 
     fn serialize(&self) -> Vec<u8> {
         let strtab = self.symtab.generate_strtab();
-        dbg!(&strtab);
+        // dbg!(&strtab);
         let strtab_section = Rc::new(RefCell::new(strtab.to_section(".strtab".into())));
 
         // gather all sections (convert RelocSection, Symbols, ... to Section)
