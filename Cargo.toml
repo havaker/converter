@@ -7,4 +7,5 @@ edition = "2018"
 [dependencies]
 goblin = "0.3"
 scroll = "0.10.2"
+keystone = { git = "https://github.com/keystone-engine/keystone" }
 
