@@ -1,7 +1,7 @@
 use goblin::{
     elf,
-    elf64::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC, STV_DEFAULT},
-    error, Object,
+    elf64::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC},
+    error,
 };
 use std::{cell::RefCell, env, ffi::OsString, fs, rc::Rc};
 
@@ -41,7 +41,6 @@ fn convert(buffer: &Vec<u8>) -> Vec<u8> {
         .map(|s| s.borrow().name.clone())
         .collect::<Vec<_>>();
 
-    //dbg!(&e.reloc_sections);
     dbg!(&section_names);
 
     for section in &mut e.reloc_sections {
@@ -73,7 +72,7 @@ fn convert(buffer: &Vec<u8>) -> Vec<u8> {
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut import_func_symbols = e
+    let import_func_symbols = e
         .symtab
         .symbols
         .iter()
@@ -123,7 +122,7 @@ fn convert(buffer: &Vec<u8>) -> Vec<u8> {
     }
 
     let mut thunkout = merge_thunks(thunkouts.into_iter());
-    thunkout.add_suffix_to_section_names("in");
+    thunkout.add_suffix_to_section_names("out");
     e.merge(thunkout);
 
     // dbg!(&func_symbols);
