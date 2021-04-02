@@ -1,6 +1,7 @@
 use goblin::{
     elf::{self, section_header::*},
     elf64::sym::STT_SECTION,
+    Object,
 };
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -24,7 +25,11 @@ pub struct Elf {
 }
 
 impl Elf {
-    pub fn new(elf: &elf::Elf, bytes: &Vec<u8>) -> Elf {
+    pub fn new(bytes: &Vec<u8>) -> Elf {
+        let elf = match Object::parse(&bytes).expect("parsing object file failed") {
+            Object::Elf(elf) => elf,
+            _ => panic!("invalid file type"),
+        };
         /* TODO
         assert!(elf.is_object_file());
         assert!(elf.little_endian);
@@ -249,4 +254,8 @@ impl Default for Elf {
             reloc_sections: Vec::new(),
         }
     }
+}
+
+pub fn create_st_info(bind: u8, symbol_type: u8) -> u8 {
+    (bind << 4) + (symbol_type & 0xf)
 }
