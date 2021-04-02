@@ -84,8 +84,8 @@ fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
         thunk.prepend_text(prepend.as_slice());
         thunk.append_text(append.as_slice());
 
-        dbg!(&thunk.text_relocs);
-        dbg!(&thunk.text);
+        // dbg!(&thunk.text_relocs);
+        // dbg!(&thunk.text);
         //let thunkin = create_thunkin(func.clone());
         thunkins.push(thunk);
 
@@ -93,19 +93,36 @@ fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
         sym.sym.st_info = create_st_info(STB_LOCAL, STT_FUNC);
     }
 
-    for thunkin in thunkins.into_iter() {
-        e.sections.push(thunkin.text);
-        e.sections.push(thunkin.rodata);
-        e.reloc_sections.push(thunkin.text_relocs);
-        e.reloc_sections.push(thunkin.rodata_relocs);
-        e.symtab.extend(thunkin.section_symbols);
-        e.symtab.extend(vec![thunkin.generated_fun_symbol]);
-        break;
-    }
+    let thunk = merge_thunks(thunkins.into_iter());
+    e.merge(thunk);
 
     // dbg!(&func_symbols);
 
     e.serialize()
+}
+
+fn merge_thunks(mut thunks: impl Iterator<Item = Thunk>) -> Elf {
+    let mut e: Elf = Default::default();
+
+    let mut first = match thunks.next() {
+        Some(thunk) => thunk,
+        None => return e,
+    };
+
+    for mut thunk in thunks {
+        first.merge_sections(&mut thunk);
+        dbg!(&thunk);
+        e.symtab.symbols.push(thunk.generated_fun_symbol);
+    }
+
+    e.sections.push(first.text);
+    e.sections.push(first.rodata);
+    e.reloc_sections.push(first.text_relocs);
+    e.reloc_sections.push(first.rodata_relocs);
+    e.symtab.extend(first.section_symbols);
+    e.symtab.symbols.push(first.generated_fun_symbol);
+
+    e
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +139,115 @@ struct Thunk {
 }
 
 impl Thunk {
+    fn merge_sections(&mut self, other: &mut Thunk) {
+        let self_text_len = self.text.borrow().content.len();
+        let self_rodata_len = self.rodata.borrow().content.len();
+
+        self.text
+            .borrow_mut()
+            .extend(other.text.borrow().content.as_slice());
+        self.rodata
+            .borrow_mut()
+            .extend(other.rodata.borrow().content.as_slice());
+
+        other.text = self.text.clone();
+        other.rodata = self.rodata.clone();
+
+        let text_symbol = self
+            .section_symbols
+            .iter()
+            .filter(|s| {
+                s.borrow()
+                    .section
+                    .as_ref()
+                    .map(|sec| sec.borrow().name.clone())
+                    == Some(".text.thunk".to_string())
+            })
+            .next()
+            .unwrap();
+        let rodata_symbol = self
+            .section_symbols
+            .iter()
+            .filter(|s| {
+                s.borrow()
+                    .section
+                    .as_ref()
+                    .map(|sec| sec.borrow().name.clone())
+                    == Some(".rodata.thunk".to_string())
+            })
+            .next()
+            .unwrap();
+
+        other.section_symbols = self.section_symbols.clone();
+
+        other.generated_fun_symbol.borrow_mut().section = Some(self.text.clone());
+        other.generated_fun_symbol.borrow_mut().sym.st_value += self_text_len as u64;
+
+        other.text_relocs.target = self.text.clone();
+        other.rodata_relocs.target = self.rodata.clone();
+
+        for reloc in other.text_relocs.relocs.iter_mut() {
+            let symbol_name = reloc
+                .symbol
+                .borrow_mut()
+                .section
+                .as_ref()
+                .map(|s| s.borrow().name.clone());
+
+            let mut skip = false;
+            match symbol_name.as_ref().map(|s| s.as_str()) {
+                Some(".text.thunk") => reloc.symbol = text_symbol.clone(),
+                Some(".rodata.thunk") => reloc.symbol = rodata_symbol.clone(),
+                Some(_) => {
+                    skip = true;
+                    //dbg!(symbol);
+                } // old function
+                _ => unreachable!(),
+            }
+
+            reloc.reloc.r_offset += self_text_len as u64;
+            if !skip {
+                if let Some(addend) = &mut reloc.reloc.r_addend {
+                    *addend += self_rodata_len as i64;
+                }
+            }
+        }
+
+        for reloc in other.rodata_relocs.relocs.iter_mut() {
+            let symbol_name = reloc
+                .symbol
+                .borrow_mut()
+                .section
+                .as_ref()
+                .map(|s| s.borrow().name.clone());
+
+            let mut skip = false;
+            match symbol_name.as_ref().map(|s| s.as_str()) {
+                Some(".text.thunk") => reloc.symbol = text_symbol.clone(),
+                Some(".rodata.thunk") => reloc.symbol = rodata_symbol.clone(),
+                Some(_) => {
+                    skip = true;
+                    //dbg!(symbol);
+                } // old function
+                _ => unreachable!(),
+            }
+
+            reloc.reloc.r_offset += self_rodata_len as u64;
+            if !skip {
+                if let Some(addend) = &mut reloc.reloc.r_addend {
+                    *addend += self_text_len as i64;
+                }
+            }
+        }
+
+        self.text_relocs
+            .relocs
+            .extend(other.text_relocs.relocs.clone());
+        self.rodata_relocs
+            .relocs
+            .extend(other.rodata_relocs.relocs.clone());
+    }
+
     fn replace_fun_symbol(&mut self, fun_symbol: Rc<RefCell<Symbol>>) {
         for reloc in &mut self.text_relocs.relocs {
             if reloc.symbol.borrow().name.as_ref().map(|n| n.as_str()) == Some("fun") {
@@ -161,18 +287,12 @@ impl Thunk {
         };
 
         let text_relocs = get_reloc_section(".text");
-        /*
-        text_relocs.relocs = text_relocs
-            .relocs
-            .into_iter()
-            .filter(|r| false && r.symbol.borrow().name.is_none())
-            .collect();
-        */
-
         let rodata_relocs = get_reloc_section(".rodata");
 
-        text.borrow_mut().name = ".text.thunkin".into();
-        rodata.borrow_mut().name = ".rodata.thunkin".into();
+        // change name
+        // TODO in/out
+        text.borrow_mut().name = ".text.thunk".into();
+        rodata.borrow_mut().name = ".rodata.thunk".into();
 
         let section_symbols = elf
             .symtab
@@ -215,18 +335,12 @@ impl Thunk {
     }
 
     fn append_text(&mut self, text: &[u8]) {
-        self.text.borrow_mut().content.extend_from_slice(text);
-        self.text.borrow_mut().header.sh_size += text.len() as u64;
+        self.text.borrow_mut().extend(text);
         self.generated_fun_symbol.borrow_mut().sym.st_size += text.len() as u64;
     }
 
     fn prepend_text(&mut self, text: &[u8]) {
-        self.text
-            .borrow_mut()
-            .content
-            .splice(0..0, text.iter().cloned());
-
-        self.text.borrow_mut().header.sh_size += text.len() as u64;
+        self.text.borrow_mut().extend_front(text);
 
         //self.generated_fun_symbol.borrow_mut().sym.st_value += text.len() as u64;
 

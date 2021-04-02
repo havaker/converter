@@ -88,6 +88,12 @@ impl Elf {
         Strtab::new(section_names)
     }
 
+    pub fn merge(&mut self, other: Elf) {
+        self.symtab.extend(other.symtab.symbols);
+        self.sections.extend(other.sections);
+        self.reloc_sections.extend(other.reloc_sections);
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         let strtab = self.symtab.generate_strtab();
         // dbg!(&strtab);
@@ -200,5 +206,15 @@ impl Elf {
         h64.e_shentsize = section_header64::SIZEOF_SHDR as u16;
 
         h64
+    }
+}
+
+impl Default for Elf {
+    fn default() -> Self {
+        Self {
+            sections: Vec::new(),
+            symtab: Default::default(),
+            reloc_sections: Vec::new(),
+        }
     }
 }

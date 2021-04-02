@@ -151,3 +151,12 @@ impl Symtab {
         local
     }
 }
+
+impl Default for Symtab {
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            orginal_index_to_new: HashMap::new(),
+        }
+    }
+}

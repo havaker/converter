@@ -39,6 +39,16 @@ impl Section {
         }
     }
 
+    pub fn extend(&mut self, content: &[u8]) {
+        self.content.extend_from_slice(content);
+        self.header.sh_size += content.len() as u64;
+    }
+
+    pub fn extend_front(&mut self, content: &[u8]) {
+        self.content.splice(0..0, content.iter().cloned());
+        self.header.sh_size += content.len() as u64;
+    }
+
     pub fn serialize(&self, buf: &mut Vec<u8>) -> usize {
         // align section
         if self.header.sh_addralign != 0 {
