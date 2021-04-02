@@ -30,6 +30,7 @@ impl Elf {
             Object::Elf(elf) => elf,
             _ => panic!("invalid file type"),
         };
+
         /* TODO
         assert!(elf.is_object_file());
         assert!(elf.little_endian);
@@ -97,6 +98,12 @@ impl Elf {
             .filter(|s| s.borrow().section_name() == Some(name.to_string()))
             .cloned()
             .next()
+    }
+
+    pub fn add_suffix_to_section_names(&mut self, suffix: &str) {
+        for section in self.sections.iter_mut() {
+            section.borrow_mut().name.push_str(suffix);
+        }
     }
 
     // TODO

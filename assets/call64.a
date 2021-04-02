@@ -1,0 +1,12 @@
+.code64
+hej:
+call fun
+
+.section .data
+ohh:
+.long hej2
+
+.section .rodata
+hej2:
+.long hej
+

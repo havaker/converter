@@ -1,0 +1,14 @@
+.code64
+ljmpl *fun_addr_64to32
+
+.code32
+fun_stub_32:
+addl $4, %esp
+popl %esi
+popl %edi
+retl
+
+.section .rodata
+fun_addr_64to32:
+.long fun_stub_32
+.long 0x23
