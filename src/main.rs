@@ -66,23 +66,179 @@ fn convert(elf: elf::Elf, buffer: &Vec<u8>) -> Vec<u8> {
 
     let mut thunkins = Vec::new();
 
+    use keystone::*;
+    let engine =
+        Keystone::new(Arch::X86, Mode::MODE_64).expect("Could not initialize Keystone engine");
+    engine
+        .option(OptionType::SYNTAX, OptionValue::SYNTAX_GAS)
+        .expect("Could not set option to nasm syntax");
+    let prepend = engine
+        .asm("pushq %rbx; pushq %rbp; pushq %r12; pushq %r13; pushq %r14; pushq %r15; subq $0x18, %rsp; movq %rdx, 8(%rsp); movl %esi, 4(%rsp); movl %edi, (%rsp)".to_string(), 0)
+        .expect("Could not assemble").bytes;
+    let append = engine
+        .asm("mov %eax, %eax; shlq $32, %rdx; orq %rdx, %rax; addq $0x18, %rsp; popq %r15; popq %r14; popq %r13; popq %r12; popq %rbp; popq %rbx; retq".to_string(), 0)
+        .expect("Could not assemble").bytes;
+
     for func in &mut global_func_symbols {
-        let thunkin = create_thunkin(func.clone());
-        thunkins.push(thunkin);
+        let mut thunk = Thunk::new(func.clone());
+        thunk.prepend_text(prepend.as_slice());
+        thunk.append_text(append.as_slice());
+
+        dbg!(&thunk.text_relocs);
+        dbg!(&thunk.text);
+        //let thunkin = create_thunkin(func.clone());
+        thunkins.push(thunk);
 
         let mut sym = func.borrow_mut();
         sym.sym.st_info = create_st_info(STB_LOCAL, STT_FUNC);
     }
 
     for thunkin in thunkins.into_iter() {
-        e.sections.push(thunkin.section);
-        e.reloc_sections.push(thunkin.reloc_section);
-        e.symtab.extend(thunkin.symbols);
+        e.sections.push(thunkin.text);
+        e.sections.push(thunkin.rodata);
+        e.reloc_sections.push(thunkin.text_relocs);
+        e.reloc_sections.push(thunkin.rodata_relocs);
+        e.symtab.extend(thunkin.section_symbols);
+        e.symtab.extend(vec![thunkin.generated_fun_symbol]);
+        break;
     }
 
     // dbg!(&func_symbols);
 
     e.serialize()
+}
+
+#[derive(Debug, Clone)]
+struct Thunk {
+    text: Rc<RefCell<Section>>,
+    text_relocs: RelocSection,
+
+    rodata: Rc<RefCell<Section>>,
+    rodata_relocs: RelocSection,
+
+    section_symbols: Vec<Rc<RefCell<Symbol>>>,
+
+    generated_fun_symbol: Rc<RefCell<Symbol>>,
+}
+
+impl Thunk {
+    fn replace_fun_symbol(&mut self, fun_symbol: Rc<RefCell<Symbol>>) {
+        for reloc in &mut self.text_relocs.relocs {
+            if reloc.symbol.borrow().name.as_ref().map(|n| n.as_str()) == Some("fun") {
+                reloc.symbol = fun_symbol.clone();
+            }
+        }
+    }
+    // func symbol
+    // asm / signature
+    fn new(fun_symbol: Rc<RefCell<Symbol>>) -> Self {
+        let buffer = fs::read("../call32from64.o").unwrap();
+
+        let elf = match Object::parse(&buffer).unwrap() {
+            Object::Elf(elf) => Elf::new(&elf, &buffer),
+            _ => panic!("invalid file type"),
+        };
+
+        let get_section = |name| {
+            elf.sections
+                .iter()
+                .filter(|s| s.borrow().name == name)
+                .cloned()
+                .next()
+                .unwrap()
+        };
+
+        let text = get_section(".text");
+        let rodata = get_section(".rodata");
+
+        let get_reloc_section = |name| {
+            elf.reloc_sections
+                .iter()
+                .filter(|s| s.target.borrow().name == name)
+                .cloned()
+                .next()
+                .unwrap()
+        };
+
+        let text_relocs = get_reloc_section(".text");
+        /*
+        text_relocs.relocs = text_relocs
+            .relocs
+            .into_iter()
+            .filter(|r| false && r.symbol.borrow().name.is_none())
+            .collect();
+        */
+
+        let rodata_relocs = get_reloc_section(".rodata");
+
+        text.borrow_mut().name = ".text.thunkin".into();
+        rodata.borrow_mut().name = ".rodata.thunkin".into();
+
+        let section_symbols = elf
+            .symtab
+            .symbols
+            .iter()
+            .filter(|s| {
+                let sym: &elf::Sym = &s.borrow().sym;
+                sym.st_type() == STT_SECTION
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let fun_name = fun_symbol.borrow().name.clone().unwrap();
+        let generated_fun_symbol = Rc::new(RefCell::new(Symbol {
+            name: Some(fun_name.clone()),
+            section: Some(text.clone()),
+            sym: elf::Sym {
+                st_name: 0,
+                st_info: create_st_info(STB_GLOBAL, STT_FUNC),
+                st_other: STV_DEFAULT,
+                st_shndx: 0,
+                st_value: 0,
+                st_size: text.borrow().content.len() as u64,
+            },
+
+            index: None,
+        }));
+
+        let mut thunk = Self {
+            text,
+            rodata,
+            text_relocs,
+            rodata_relocs,
+            section_symbols,
+            generated_fun_symbol,
+        };
+
+        thunk.replace_fun_symbol(fun_symbol);
+        thunk
+    }
+
+    fn append_text(&mut self, text: &[u8]) {
+        self.text.borrow_mut().content.extend_from_slice(text);
+        self.text.borrow_mut().header.sh_size += text.len() as u64;
+        self.generated_fun_symbol.borrow_mut().sym.st_size += text.len() as u64;
+    }
+
+    fn prepend_text(&mut self, text: &[u8]) {
+        self.text
+            .borrow_mut()
+            .content
+            .splice(0..0, text.iter().cloned());
+
+        self.text.borrow_mut().header.sh_size += text.len() as u64;
+
+        //self.generated_fun_symbol.borrow_mut().sym.st_value += text.len() as u64;
+
+        for reloc in &mut self.text_relocs.relocs {
+            reloc.reloc.r_offset += text.len() as u64;
+        }
+        for reloc in &mut self.rodata_relocs.relocs {
+            if let Some(addend) = &mut reloc.reloc.r_addend {
+                *addend += text.len() as i64;
+            }
+        }
+    }
 }
 
 struct Thunkin {
@@ -206,7 +362,7 @@ fn create_thunkin(func_symbol: Rc<RefCell<Symbol>>) -> Thunkin {
     Thunkin {
         section,
         reloc_section,
-        symbols: vec![func64_symbol, func_symbol, section_symbol],
+        symbols: vec![func64_symbol, section_symbol],
     }
 }
 
