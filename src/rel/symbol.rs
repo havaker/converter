@@ -28,4 +28,8 @@ impl Symbol {
 
         sym_copy
     }
+
+    pub fn section_name(&self) -> Option<String> {
+        self.section.as_ref().map(|s| s.borrow().name.clone())
+    }
 }

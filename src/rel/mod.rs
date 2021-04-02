@@ -1,4 +1,7 @@
-use goblin::elf::{self, section_header::*};
+use goblin::{
+    elf::{self, section_header::*},
+    elf64::sym::STT_SECTION,
+};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 mod reloc;
@@ -60,6 +63,35 @@ impl Elf {
             reloc_sections,
             symtab,
         }
+    }
+
+    pub fn section_by_name(&self, name: &str) -> Option<Rc<RefCell<Section>>> {
+        self.sections
+            .iter()
+            .filter(|s| s.borrow().name == name)
+            .cloned()
+            .next()
+    }
+
+    pub fn reloc_section_by_name(&self, name: &str) -> Option<RelocSection> {
+        self.reloc_sections
+            .iter()
+            .filter(|s| s.target.borrow().name == name)
+            .cloned()
+            .next()
+    }
+
+    pub fn section_symbol_by_name(&self, name: &str) -> Option<Rc<RefCell<Symbol>>> {
+        self.symtab
+            .symbols
+            .iter()
+            .filter(|s| {
+                let sym: &elf::Sym = &s.borrow().sym;
+                sym.st_type() == STT_SECTION
+            })
+            .filter(|s| s.borrow().section_name() == Some(name.to_string()))
+            .cloned()
+            .next()
     }
 
     // TODO
