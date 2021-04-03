@@ -3,11 +3,14 @@ use goblin::{
     elf64::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC},
     error,
 };
-use std::{cell::RefCell, env, ffi::OsString, fs, rc::Rc};
+use keystone::*;
+use std::{cell::RefCell, collections::HashMap, env, ffi::OsString, fs, rc::Rc};
 
+mod func;
 mod rel;
 mod thunk;
 
+use func::*;
 use rel::*;
 use thunk::*;
 
@@ -15,24 +18,27 @@ use thunk::*;
 
 fn main() -> error::Result<()> {
     let args: Vec<OsString> = env::args_os().collect();
-    if args.len() != 3 {
+    if args.len() != 4 {
         panic!("invalid argument count");
     }
 
     let input_path = &args[1];
-    let output_path = &args[2];
+    let function_list_path = &args[2];
+    let output_path = &args[3];
+
     dbg!(&args);
 
+    let functions = Function::load(function_list_path)?;
     let buffer = fs::read(input_path)?;
 
-    let converted = convert(&buffer);
+    let converted = convert(&buffer, functions);
 
     fs::write(output_path, &converted)?;
 
     Ok(())
 }
 
-fn convert(buffer: &Vec<u8>) -> Vec<u8> {
+fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
     let mut e = rel::Elf::new(buffer);
 
     let section_names = &e
@@ -84,30 +90,36 @@ fn convert(buffer: &Vec<u8>) -> Vec<u8> {
 
     let mut thunkins = Vec::new();
 
-    use keystone::*;
     let engine =
         Keystone::new(Arch::X86, Mode::MODE_64).expect("Could not initialize Keystone engine");
     engine
         .option(OptionType::SYNTAX, OptionValue::SYNTAX_GAS)
         .expect("Could not set option to gas syntax");
-    let prepend = engine
-        .asm("pushq %rbx; pushq %rbp; pushq %r12; pushq %r13; pushq %r14; pushq %r15; subq $0x18, %rsp; movq %rdx, 8(%rsp); movl %esi, 4(%rsp); movl %edi, (%rsp)".to_string(), 0)
-        .expect("Could not assemble").bytes;
-    let append = engine
-        .asm("mov %eax, %eax; shlq $32, %rdx; orq %rdx, %rax; addq $0x18, %rsp; popq %r15; popq %r14; popq %r13; popq %r12; popq %rbp; popq %rbx; retq".to_string(), 0)
-        .expect("Could not assemble").bytes;
 
-    for func in &mut global_func_symbols {
-        let mut thunk = Thunk::new(ThunkType::Call32From64(func.clone()));
-        thunk.prepend_text(prepend.as_slice());
-        thunk.append_text(append.as_slice());
+    for func_symbol in &mut global_func_symbols {
+        let name = func_symbol
+            .borrow()
+            .name
+            .clone()
+            .expect("global func must have a name");
 
-        // dbg!(&thunk.text_relocs);
-        // dbg!(&thunk.text);
-        //let thunkin = create_thunkin(func.clone());
+        let func_signature = functions.get(&name).expect("unknown function");
+
+        let params_asm = func_signature.parameters_to_32bit_convention();
+        let return_value_asm = func_signature.return_value_to_32bit_convention();
+
+        let params = engine.asm(params_asm, 0).expect("could not assemble").bytes;
+        let return_value = engine
+            .asm(return_value_asm, 0)
+            .expect("could not assemble")
+            .bytes;
+
+        let mut thunk = Thunk::new(ThunkType::Call32From64(func_symbol.clone()));
+        thunk.prepend_text(params.as_slice());
+        thunk.append_text(return_value.as_slice());
         thunkins.push(thunk);
 
-        let mut sym = func.borrow_mut();
+        let mut sym = func_symbol.borrow_mut();
         sym.sym.st_info = create_st_info(STB_LOCAL, STT_FUNC);
     }
 
@@ -125,8 +137,6 @@ fn convert(buffer: &Vec<u8>) -> Vec<u8> {
     thunkout.add_suffix_to_section_names("out");
     e.merge(thunkout);
 
-    // dbg!(&func_symbols);
-
     e.serialize()
 }
 
@@ -135,7 +145,6 @@ fn generate_thunkout(e: &mut Elf, func: Rc<RefCell<Symbol>>) -> Thunk {
     let mut call64 = Thunk::new(ThunkType::Call64(func.clone()));
     let jumpto32 = Thunk::new(ThunkType::JumpTo32);
 
-    use keystone::*;
     let engine =
         Keystone::new(Arch::X86, Mode::MODE_64).expect("Could not initialize Keystone engine");
     engine
