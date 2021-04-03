@@ -81,7 +81,6 @@ impl RelocSection {
         use scroll::Pwrite;
 
         let name = format!(".rela{}", self.target.borrow().name);
-        // dbg!(&name);
 
         let relocs = self.relocs.iter().map(|r| {
             let mut updated_reloc = r.reloc.clone();

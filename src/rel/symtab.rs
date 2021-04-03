@@ -84,15 +84,32 @@ impl Symtab {
         Strtab::new(symbol_names)
     }
 
+    fn filter_symbols_with_broken_section_ref(
+        symbols: Vec<Rc<RefCell<Symbol>>>,
+    ) -> Vec<Rc<RefCell<Symbol>>> {
+        symbols
+            .into_iter()
+            .filter(|s| {
+                s.borrow()
+                    .section
+                    .as_ref()
+                    .map(|section| section.borrow().index.is_some())
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>()
+    }
+
     pub fn to_section(&self, strtab_index: usize, strtab: &Strtab) -> Section {
         use goblin::container::{Container, Ctx, Endian};
         use scroll::Pwrite;
 
         let sorted_symbols = self.get_sorted_symbols();
 
-        Self::update_indexes(&sorted_symbols);
+        let filtered_symbols = Self::filter_symbols_with_broken_section_ref(sorted_symbols);
 
-        let syms = sorted_symbols
+        Self::update_indexes(&filtered_symbols);
+
+        let syms = filtered_symbols
             .iter()
             .map(|symbol| symbol.borrow().get_sym_with_updated_indexes(strtab))
             .collect::<Vec<_>>();

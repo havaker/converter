@@ -140,7 +140,6 @@ impl Elf {
 
     pub fn serialize(&self) -> Vec<u8> {
         let strtab = self.symtab.generate_strtab();
-        // dbg!(&strtab);
         let strtab_section = Rc::new(RefCell::new(strtab.to_section(".strtab".into())));
 
         // gather all sections (convert RelocSection, Symbols, ... to Section)
