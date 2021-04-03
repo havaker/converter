@@ -49,7 +49,7 @@ impl Thunk {
             ThunkType::JumpTo32 => (JUMPTO32_TEMPLATE, None),
         };
 
-        let elf = Elf::new(&buffer.to_vec());
+        let elf = Elf::new(&buffer.to_vec(), false);
 
         let text = elf.section_by_name(".text").unwrap();
         let rodata = elf

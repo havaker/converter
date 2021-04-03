@@ -62,7 +62,7 @@ impl RelocSection {
         for reloc in reloc_section.iter() {
             let symbol = symtab
                 .get_using_orginal_index(reloc.r_sym)
-                .expect("failed to find symbol"); // TODO ups
+                .expect("failed to find symbol");
             let r = Reloc { reloc, symbol };
             relocs.push(r);
         }
@@ -119,7 +119,6 @@ impl RelocSection {
             .index
             .expect("symtab associated with reloc section should have index assigned")
             as u32;
-        // TODO sh_addralign: 2 << 8??
         header.sh_addralign = 8;
         header.sh_flags = SHF_INFO_LINK as u64;
 

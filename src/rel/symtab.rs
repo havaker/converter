@@ -84,6 +84,8 @@ impl Symtab {
         Strtab::new(symbol_names)
     }
 
+    // this filters symbols that reference a section, that was discarded
+    // during convertion process
     fn filter_symbols_with_broken_section_ref(
         symbols: Vec<Rc<RefCell<Symbol>>>,
     ) -> Vec<Rc<RefCell<Symbol>>> {

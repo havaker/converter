@@ -25,17 +25,17 @@ pub struct Elf {
 }
 
 impl Elf {
-    pub fn new(bytes: &Vec<u8>) -> Elf {
+    pub fn new(bytes: &Vec<u8>, assert32: bool) -> Elf {
         let elf = match Object::parse(&bytes).expect("parsing object file failed") {
             Object::Elf(elf) => elf,
             _ => panic!("invalid file type"),
         };
 
-        /* TODO
         assert!(elf.is_object_file());
         assert!(elf.little_endian);
-        assert!(!elf.is_64);
-        */
+        if assert32 {
+            assert!(!elf.is_64);
+        }
 
         let mut sections = BTreeMap::new();
         let mut reloc_sections = Vec::new();
@@ -202,7 +202,7 @@ impl Elf {
             header.sh_offset = offset as u64;
             header.sh_name = strtab
                 .offset_for_string(&section.borrow().name)
-                .expect("section should have valid name"); // TODO sure?
+                .expect("section should have valid name");
             headers.push(header);
         }
 

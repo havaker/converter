@@ -20,21 +20,12 @@ pub struct Generator {
 impl Generator {
     pub fn new(functions: HashMap<String, Function>) -> Self {
         let engine =
-            Keystone::new(Arch::X86, Mode::MODE_64).expect("could not initialize Keystone engine");
+            Keystone::new(Arch::X86, Mode::MODE_64).expect("could not initialize keystone engine");
         engine
             .option(OptionType::SYNTAX, OptionValue::SYNTAX_GAS)
             .expect("could not set option to GNU assembler syntax");
 
         Generator { engine, functions }
-    }
-
-    fn signature<'a>(&'a self, func_symbol: &Symbol) -> Option<&'a Function> {
-        self.functions.get(
-            func_symbol
-                .name
-                .as_ref()
-                .expect("func symbol should have a name"),
-        )
     }
 
     pub fn generate_thunks(&self, rel: &mut Elf) {
@@ -51,7 +42,7 @@ impl Generator {
             is_function && is_global
         };
 
-        let is_import_func = |symbol: &&Rc<RefCell<Symbol>>| {
+        let is_undefined = |symbol: &&Rc<RefCell<Symbol>>| {
             let sym: &elf::Sym = &symbol.borrow().sym;
             let is_undefined = sym.st_shndx == SHN_UNDEF as usize;
 
@@ -73,7 +64,7 @@ impl Generator {
             .symbols
             .iter()
             .filter(has_name)
-            .filter(is_import_func)
+            .filter(is_undefined)
             .cloned()
             .collect::<Vec<_>>()
             .into_iter();
@@ -83,39 +74,17 @@ impl Generator {
     }
 
     fn generate_thunkins(&self, funcs: impl Iterator<Item = Rc<RefCell<Symbol>>>, rel: &mut Elf) {
-        let mut thunks = Vec::new();
-        for func in funcs {
-            let thunk = match self.generate_thunkin(func.clone()) {
-                Some(thunk) => thunk,
-                None => {
-                    eprintln!("could not generate thunkin for symbol: {:?}", func);
-                    continue;
-                }
-            };
+        let thunks = funcs.filter_map(|func| self.generate_thunkin(func));
 
-            thunks.push(thunk);
-        }
-
-        let mut merged_thunks = merge_thunks(thunks.into_iter());
+        let mut merged_thunks = merge_thunks(thunks);
         merged_thunks.add_suffix_to_section_names("in");
         rel.merge(merged_thunks);
     }
 
     fn generate_thunkouts(&self, funcs: impl Iterator<Item = Rc<RefCell<Symbol>>>, rel: &mut Elf) {
-        let mut thunks = Vec::new();
-        for func in funcs {
-            let thunk = match self.generate_thunkout(rel, func.clone()) {
-                Some(thunk) => thunk,
-                None => {
-                    eprintln!("could not generate thunkout for symbol: {:?}", func);
-                    continue;
-                }
-            };
+        let thunks = funcs.filter_map(|func| self.generate_thunkout(rel, func));
 
-            thunks.push(thunk);
-        }
-
-        let mut merged_thunks = merge_thunks(thunks.into_iter());
+        let mut merged_thunks = merge_thunks(thunks);
         merged_thunks.add_suffix_to_section_names("out");
         rel.merge(merged_thunks);
     }
@@ -193,5 +162,14 @@ impl Generator {
         }
 
         Some(result)
+    }
+
+    fn signature<'a>(&'a self, func_symbol: &Symbol) -> Option<&'a Function> {
+        self.functions.get(
+            func_symbol
+                .name
+                .as_ref()
+                .expect("func symbol should have a name"),
+        )
     }
 }

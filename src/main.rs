@@ -6,8 +6,6 @@ mod rel;
 
 use gen::*;
 
-// TODO R_X86_64_32 or R_X86_64_32S
-
 fn main() -> error::Result<()> {
     let args: Vec<OsString> = env::args_os().collect();
     if args.len() != 4 {
@@ -28,7 +26,7 @@ fn main() -> error::Result<()> {
 }
 
 fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
-    let mut e = rel::Elf::new(buffer);
+    let mut e = rel::Elf::new(buffer, true);
 
     for section in &mut e.reloc_sections {
         section.to_rela();
