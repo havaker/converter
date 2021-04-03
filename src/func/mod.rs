@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
 
+use ValueType::*;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueType {
     Int,
@@ -79,12 +81,14 @@ impl Function {
     }
 
     pub fn return_value_to_32bit_convention(&self) -> String {
-        let convert_ret = if let Some(8) = self.return_type.as_ref().map(|t| t.size(false)) {
-            "mov %eax, %eax; \
-             shlq $0x20, %rdx; \
-             orq %rdx, %rax; "
-        } else {
-            ""
+        let convert_ret = match &self.return_type {
+            Some(Long) => "cdqe; ",
+            Some(LongLong) | Some(ULongLong) => {
+                "mov %eax, %eax; \
+                 shlq $0x20, %rdx; \
+                 orq %rdx, %rax; "
+            }
+            _ => "",
         };
 
         let ungrow_stack = format!("addq ${:#04x}, %rsp; ", self.stack_size());
@@ -97,10 +101,7 @@ impl Function {
             popq %rbp; \
             popq %rbx; ";
 
-        format!(
-            "{}{}{} retq; ",
-            convert_ret, ungrow_stack, RESTORE_REGISTERS
-        )
+        format!("{}{}{}retq; ", convert_ret, ungrow_stack, RESTORE_REGISTERS)
     }
 
     pub fn parse(line: &str) -> Function {
@@ -141,7 +142,6 @@ impl Function {
 
 impl ValueType {
     fn parse(word: &str) -> Option<ValueType> {
-        use ValueType::*;
         match word {
             "void" => None,
             "int" => Some(Int),
@@ -156,7 +156,6 @@ impl ValueType {
     }
 
     fn size(&self, is_64: bool) -> usize {
-        use ValueType::*;
         match &self {
             Int | UInt => 4,
             Ptr | Long | ULong => {
@@ -199,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn test_instruction_generation() {
+    fn test_instruction_generation_for_parameters32() {
         let signature = "fun longlong ptr int longlong";
         let function = Function::parse(signature);
 
@@ -216,5 +215,27 @@ mod tests {
             movl %edi, 0x00(%rsp); ";
 
         assert_eq!(expected_params32, function.parameters_to_32bit_convention());
+    }
+
+    #[test]
+    fn test_instruction_generation_for_return_type32() {
+        let signature = "fun long";
+        let function = Function::parse(signature);
+
+        let expected_return32 = "\
+            cdqe; \
+            addq $0x08, %rsp; \
+            popq %r15; \
+            popq %r14; \
+            popq %r13; \
+            popq %r12; \
+            popq %rbp; \
+            popq %rbx; \
+            retq; ";
+
+        assert_eq!(
+            expected_return32,
+            function.return_value_to_32bit_convention()
+        );
     }
 }
