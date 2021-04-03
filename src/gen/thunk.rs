@@ -7,7 +7,7 @@ use goblin::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-use super::rel::*;
+use crate::rel::*;
 
 const CALL32FROM64_TEMPLATE: &[u8] = include_bytes!("../../assets/call32from64.o");
 const JUMPTO64_TEMPLATE: &[u8] = include_bytes!("../../assets/jumpto64.o");

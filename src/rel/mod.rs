@@ -106,7 +106,7 @@ impl Elf {
         }
     }
 
-    // TODO
+    // gets sections that will be copied during serialization process
     fn filtered_sections(&self) -> Vec<Rc<RefCell<Section>>> {
         self.sections
             .iter()
