@@ -40,7 +40,7 @@ impl Function {
     }
 
     pub fn parameters_to_32bit_convention(&self) -> String {
-        let mut asm = vec![];
+        let mut instructions = vec![];
         let mut offset = 0;
         for (index, param) in self.parameters.iter().enumerate() {
             let size = param.size(false);
@@ -48,41 +48,59 @@ impl Function {
             let register_name = Self::get_register_name(index, is_big);
             let mov_suffix = if is_big { "q" } else { "l" };
 
+            // saves argument on stack
             let mov = format!(
-                "mov{} %{}, {:#04x}(%rsp);",
+                "mov{} %{}, {:#04x}(%rsp); ",
                 mov_suffix, register_name, offset
             );
-            asm.push(mov);
+            instructions.push(mov);
 
             offset += size;
         }
 
-        let grow_stack = format!("subq ${:#04x}, %rsp;", self.stack_size());
-        asm.push(grow_stack);
+        // grows stack to fit arguments
+        let grow_stack = format!("subq ${:#04x}, %rsp; ", self.stack_size());
+        instructions.push(grow_stack);
 
-        const SAVE_REGISTERS: &'static str =
-            "pushq %rbx; pushq %rbp; pushq %r12; pushq %r13; pushq %r14; pushq %r15;";
-        asm.push(SAVE_REGISTERS.into());
+        // saving registers that get destroyed during switch to 64-bit mode
+        const SAVE_REGISTERS: &'static str = "\
+            pushq %rbx; \
+            pushq %rbp; \
+            pushq %r12; \
+            pushq %r13; \
+            pushq %r14; \
+            pushq %r15; ";
+        instructions.push(SAVE_REGISTERS.into());
 
-        asm.reverse();
-        let merged: String = asm.iter().flat_map(|s| s.chars()).collect();
+        instructions.reverse();
+        let merged: String = instructions.iter().flat_map(|s| s.chars()).collect();
 
         merged
     }
 
     pub fn return_value_to_32bit_convention(&self) -> String {
         let convert_ret = if let Some(8) = self.return_type.as_ref().map(|t| t.size(false)) {
-            "mov %eax, %eax; shlq $0x20, %rdx; orq %rdx, %rax;"
+            "mov %eax, %eax; \
+             shlq $0x20, %rdx; \
+             orq %rdx, %rax; "
         } else {
             ""
         };
 
-        let ungrow_stack = format!("addq ${:#04x}, %rsp;", self.stack_size());
+        let ungrow_stack = format!("addq ${:#04x}, %rsp; ", self.stack_size());
 
-        const RESTORE_REGISTERS: &'static str =
-            "popq %r15; popq %r14; popq %r13; popq %r12; popq %rbp; popq %rbx;";
+        const RESTORE_REGISTERS: &'static str = "\
+            popq %r15; \
+            popq %r14; \
+            popq %r13; \
+            popq %r12; \
+            popq %rbp; \
+            popq %rbx; ";
 
-        format!("{}{}{} retq;", convert_ret, ungrow_stack, RESTORE_REGISTERS)
+        format!(
+            "{}{}{} retq; ",
+            convert_ret, ungrow_stack, RESTORE_REGISTERS
+        )
     }
 
     pub fn parse(line: &str) -> Function {
@@ -178,5 +196,25 @@ mod tests {
         let function = Function::parse(signature);
 
         assert_eq!(function.return_type, None);
+    }
+
+    #[test]
+    fn test_instruction_generation() {
+        let signature = "fun longlong ptr int longlong";
+        let function = Function::parse(signature);
+
+        let expected_params32 = "\
+            pushq %rbx; \
+            pushq %rbp; \
+            pushq %r12; \
+            pushq %r13; \
+            pushq %r14; \
+            pushq %r15; \
+            subq $0x18, %rsp; \
+            movq %rdx, 0x08(%rsp); \
+            movl %esi, 0x04(%rsp); \
+            movl %edi, 0x00(%rsp); ";
+
+        assert_eq!(expected_params32, function.parameters_to_32bit_convention());
     }
 }
