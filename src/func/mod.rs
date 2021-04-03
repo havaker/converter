@@ -41,6 +41,30 @@ impl Function {
         Ok(functions)
     }
 
+    pub fn parameters_to_64bit_convention(&self) -> String {
+        let mut instructions = vec![];
+        let mut offset = 16;
+        for (index, param) in self.parameters.iter().enumerate() {
+            let mov = match param {
+                UInt | Int | ULong | Ptr => "movl",
+                Long => "movslq",
+                LongLong | ULongLong => "movq",
+            };
+
+            let register = match param {
+                UInt | Int | ULong | Ptr => Self::get_register_name(index, false),
+                LongLong | ULongLong | Long => Self::get_register_name(index, true),
+            };
+
+            let instruction = format!("{} {:#04x}(%rsp), %{}; ", mov, offset, register);
+            instructions.push(instruction);
+            offset += param.size(false);
+        }
+
+        let merged: String = instructions.iter().flat_map(|s| s.chars()).collect();
+        merged
+    }
+
     pub fn parameters_to_32bit_convention(&self) -> String {
         let mut instructions = vec![];
         let mut offset = 0;
@@ -102,6 +126,18 @@ impl Function {
             popq %rbx; ";
 
         format!("{}{}{}retq; ", convert_ret, ungrow_stack, RESTORE_REGISTERS)
+    }
+
+    pub fn return_value_to_64bit_convention(&self) -> String {
+        let convert_ret = match &self.return_type {
+            Some(LongLong) | Some(ULongLong) => {
+                "movq %rax, %rdx; \
+                 shrq $0x20, %rdx; "
+            }
+            _ => "",
+        };
+
+        convert_ret.into()
     }
 
     pub fn parse(line: &str) -> Function {
@@ -215,6 +251,19 @@ mod tests {
             movl %edi, 0x00(%rsp); ";
 
         assert_eq!(expected_params32, function.parameters_to_32bit_convention());
+    }
+
+    #[test]
+    fn test_instruction_generation_for_parameters64() {
+        let signature = "fun longlong ptr long longlong";
+        let function = Function::parse(signature);
+
+        let expected_params64 = "\
+            movl 0x10(%rsp), %edi; \
+            movslq 0x14(%rsp), %rsi; \
+            movq 0x18(%rsp), %rdx; ";
+
+        assert_eq!(expected_params64, function.parameters_to_64bit_convention());
     }
 
     #[test]

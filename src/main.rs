@@ -1,6 +1,9 @@
 use goblin::{
     elf,
-    elf64::sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC},
+    elf64::{
+        section_header::SHN_UNDEF,
+        sym::{STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_FUNC},
+    },
     error,
 };
 use keystone::*;
@@ -53,6 +56,7 @@ fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
         section.to_rela();
     }
 
+    // TODO
     let is_global_func = |symbol: &&Rc<RefCell<Symbol>>| {
         let sym: &elf::Sym = &symbol.borrow().sym;
         let is_function = sym.st_type() == STT_FUNC;
@@ -63,11 +67,10 @@ fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
 
     let is_import_func = |symbol: &&Rc<RefCell<Symbol>>| {
         let sym: &elf::Sym = &symbol.borrow().sym;
-        let is_import = sym.is_import();
-        let is_known = symbol.borrow().name == Some("to64".to_string());
-        let is_known2 = symbol.borrow().name == Some("to64_2".to_string());
+        let is_global = sym.st_bind() == STB_GLOBAL || sym.st_bind() == STB_WEAK;
+        let is_undefined = sym.st_shndx == SHN_UNDEF as usize;
 
-        (is_known || is_known2) && is_import
+        is_global && is_undefined
     };
 
     let mut global_func_symbols = e
@@ -129,7 +132,18 @@ fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
 
     let mut thunkouts = Vec::new();
     for func in &import_func_symbols {
-        let thunk = generate_thunkout(&mut e, func.clone());
+        let name = match func.borrow().name.clone() {
+            Some(name) => name,
+            None => continue,
+        };
+        dbg!(&name);
+
+        let func_signature = match functions.get(&name) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let thunk = generate_thunkout(&mut e, func.clone(), func_signature);
         thunkouts.push(thunk);
     }
 
@@ -140,7 +154,7 @@ fn convert(buffer: &Vec<u8>, functions: HashMap<String, Function>) -> Vec<u8> {
     e.serialize()
 }
 
-fn generate_thunkout(e: &mut Elf, func: Rc<RefCell<Symbol>>) -> Thunk {
+fn generate_thunkout(e: &mut Elf, func: Rc<RefCell<Symbol>>, signature: &Function) -> Thunk {
     let mut jumpto64 = Thunk::new(ThunkType::JumpTo64);
     let mut call64 = Thunk::new(ThunkType::Call64(func.clone()));
     let jumpto32 = Thunk::new(ThunkType::JumpTo32);
@@ -150,21 +164,18 @@ fn generate_thunkout(e: &mut Elf, func: Rc<RefCell<Symbol>>) -> Thunk {
     engine
         .option(OptionType::SYNTAX, OptionValue::SYNTAX_GAS)
         .expect("Could not set option to gas syntax");
-    let prepend = engine
-        .asm(
-            "movl 0x10(%rsp), %edi; movslq 0x14(%rsp), %rsi; movq 0x18(%rsp), %rdx;".to_string(),
-            0,
-        )
-        .expect("Could not assemble")
+
+    let params_asm = signature.parameters_to_64bit_convention();
+    let return_value_asm = signature.return_value_to_64bit_convention();
+
+    let params = engine.asm(params_asm, 0).expect("could not assemble").bytes;
+    let return_value = engine
+        .asm(return_value_asm, 0)
+        .expect("could not assemble")
         .bytes;
 
-    let append = engine
-        .asm("movq %rax, %rdx; shrq $32, %rdx;".to_string(), 0)
-        .expect("Could not assemble")
-        .bytes;
-
-    call64.prepend_text(&prepend);
-    call64.append_text(&append);
+    call64.prepend_text(&params);
+    call64.append_text(&return_value);
 
     let generated_fun = call64.generated_fun().unwrap();
 
