@@ -1,0 +1,21 @@
+BUILDING
+
+# assuming debian
+apt install cargo g++ cmake python3
+cargo build --release
+
+
+RUNNING
+
+./converter <ET_REL input file> <file with function list> <ET_REL output file>
+
+
+FUNCTION LIST FILE FORMAT
+
+Each line describes one function
+
+Example line:
+fopen ptr ptr ptr
+
+Corresponding function signature:
+FILE *fopen(const char *, const char *)
